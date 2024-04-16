@@ -1,5 +1,6 @@
 <launch>
     
+
     <param name="scan_line" type="int" value="16" />
 
     <!-- if 1, do mapping 10 Hz, if 2, do mapping 5 Hz. Suggest to use 1, it will adjust frequence automaticlly -->
@@ -25,13 +26,22 @@
     <!--  -->
     <param name="lidar_type" type="string" value="VLP16"/> 
     <remap from="/velodyne_points" to="/velodyne_points"/>
-    
+    <group ns="loam">
     <!-- nodes -->
-    <node pkg="aloam_velodyne" type="ascanRegistration" name="ascanRegistration" output="screen" />
+    <node pkg="aloam_velodyne" type="ascanRegistration" name="ascanRegistration" output="screen">
+        <remap from="velodyne_points" to="/velodyne_points" />
+        <param name="scan_line" type="int" value="16" />
+        <param name="minimum_range" type="double" value="0.1"/>
+        <param name="lidar_type" type="string" value="VLP16"/>
+        <param name="base_frame" type="string" value="base_footprint"/>
+        <param name="odom_frame" type="string" value="odom"/>
+    </node>
     <node pkg="aloam_velodyne" type="alaserOdometry" name="alaserOdometry" output="screen" />
     <node pkg="aloam_velodyne" type="alaserMapping" name="alaserMapping" output="screen" />
+    <node pkg="tf2_ros" type="static_transform_publisher" name="map_odom_broadcaster" args="0 0 0 0 0 0 1 map odom" />
     <node pkg="aloam_velodyne" type="alaserPGO" name="alaserPGO" output="screen" /> <!-- SC-A-LOAM -->
 
+    </group>
     <!-- visulaization -->
     <arg name="rviz" default="true" />
     <group if="$(arg rviz)">

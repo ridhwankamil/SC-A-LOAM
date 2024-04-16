@@ -28,11 +28,13 @@
 #include <sensor_msgs/Imu.h>
 #include <sensor_msgs/PointCloud2.h>
 #include <sensor_msgs/NavSatFix.h>
-#include <tf/transform_datatypes.h>
-#include <tf/transform_broadcaster.h>
+#include <tf2/LinearMath/Matrix3x3.h>
+#include <tf2_ros/transform_broadcaster.h>
 #include <nav_msgs/Odometry.h>
 #include <nav_msgs/Path.h>
 #include <geometry_msgs/PoseStamped.h>
+#include <geometry_msgs/TransformStamped.h>
+#include <tf2_ros/static_transform_broadcaster.h>
 
 #include <eigen3/Eigen/Dense>
 
@@ -56,6 +58,7 @@
 #include "aloam_velodyne/tic_toc.h"
 
 #include "scancontext/Scancontext.h"
+
 
 using namespace gtsam;
 
@@ -135,6 +138,10 @@ std::string odomKITTIformat;
 std::fstream pgG2oSaveStream, pgTimeSaveStream;
 
 std::vector<std::string> edges_str; // used in writeEdge
+
+std::string map_frame;
+std::string odom_frame;
+std::string base_frame;
 
 std::string padZeros(int val, int num_digits = 6) 
 {
@@ -316,7 +323,8 @@ Pose6D getOdom(nav_msgs::Odometry::ConstPtr _odom)
 
     double roll, pitch, yaw;
     geometry_msgs::Quaternion quat = _odom->pose.pose.orientation;
-    tf::Matrix3x3(tf::Quaternion(quat.x, quat.y, quat.z, quat.w)).getRPY(roll, pitch, yaw);
+    // tf::Matrix3x3(tf::Quaternion(quat.x, quat.y, quat.z, quat.w)).getRPY(roll, pitch, yaw);
+    tf2::Matrix3x3(tf2::Quaternion(quat.x, quat.y, quat.z, quat.w)).getRPY(roll, pitch, yaw);
 
     return Pose6D{tx, ty, tz, roll, pitch, yaw}; 
 } // getOdom
@@ -362,7 +370,7 @@ void pubPath( void )
     // pub odom and path 
     nav_msgs::Odometry odomAftPGO;
     nav_msgs::Path pathAftPGO;
-    pathAftPGO.header.frame_id = "camera_init";
+    pathAftPGO.header.frame_id = odom_frame;
     mKF.lock(); 
     // for (int node_idx=0; node_idx < int(keyframePosesUpdated.size()) - 1; node_idx++) // -1 is just delayed visualization (because sometimes mutexed while adding(push_back) a new one)
     for (int node_idx=0; node_idx < recentIdxUpdated; node_idx++) // -1 is just delayed visualization (because sometimes mutexed while adding(push_back) a new one)
@@ -371,13 +379,17 @@ void pubPath( void )
         // const gtsam::Pose3& pose_est = isamCurrentEstimate.at<gtsam::Pose3>(node_idx);
 
         nav_msgs::Odometry odomAftPGOthis;
-        odomAftPGOthis.header.frame_id = "camera_init";
+        odomAftPGOthis.header.frame_id = odom_frame;
         odomAftPGOthis.child_frame_id = "aft_pgo";
         odomAftPGOthis.header.stamp = ros::Time().fromSec(keyframeTimes.at(node_idx));
         odomAftPGOthis.pose.pose.position.x = pose_est.x;
         odomAftPGOthis.pose.pose.position.y = pose_est.y;
         odomAftPGOthis.pose.pose.position.z = pose_est.z;
-        odomAftPGOthis.pose.pose.orientation = tf::createQuaternionMsgFromRollPitchYaw(pose_est.roll, pose_est.pitch, pose_est.yaw);
+        auto q = tf2::Quaternion(pose_est.yaw,pose_est.pitch,pose_est.roll);
+        odomAftPGOthis.pose.pose.orientation.x = q.getX();
+        odomAftPGOthis.pose.pose.orientation.y = q.getY();
+        odomAftPGOthis.pose.pose.orientation.z = q.getZ();
+        odomAftPGOthis.pose.pose.orientation.w = q.getW();
         odomAftPGO = odomAftPGOthis;
 
         geometry_msgs::PoseStamped poseStampAftPGO;
@@ -385,23 +397,29 @@ void pubPath( void )
         poseStampAftPGO.pose = odomAftPGOthis.pose.pose;
 
         pathAftPGO.header.stamp = odomAftPGOthis.header.stamp;
-        pathAftPGO.header.frame_id = "camera_init";
+        pathAftPGO.header.frame_id = odom_frame;
         pathAftPGO.poses.push_back(poseStampAftPGO);
     }
     mKF.unlock(); 
     pubOdomAftPGO.publish(odomAftPGO); // last pose 
-    pubPathAftPGO.publish(pathAftPGO); // poses 
+    pubPathAftPGO.publish(pathAftPGO); // poses
 
-    static tf::TransformBroadcaster br;
-    tf::Transform transform;
-    tf::Quaternion q;
-    transform.setOrigin(tf::Vector3(odomAftPGO.pose.pose.position.x, odomAftPGO.pose.pose.position.y, odomAftPGO.pose.pose.position.z));
-    q.setW(odomAftPGO.pose.pose.orientation.w);
-    q.setX(odomAftPGO.pose.pose.orientation.x);
-    q.setY(odomAftPGO.pose.pose.orientation.y);
-    q.setZ(odomAftPGO.pose.pose.orientation.z);
-    transform.setRotation(q);
-    br.sendTransform(tf::StampedTransform(transform, odomAftPGO.header.stamp, "camera_init", "aft_pgo"));
+    static tf2_ros::TransformBroadcaster br;
+    geometry_msgs::TransformStamped transformStamped;
+
+    // transformStamped.header.stamp = odomAftPGO.header.stamp;
+    transformStamped.header.stamp = ros::Time::now();
+    transformStamped.header.frame_id = odom_frame;
+    transformStamped.child_frame_id = "aft_pgo";
+    transformStamped.transform.translation.x = odomAftPGO.pose.pose.position.x;
+    transformStamped.transform.translation.y = odomAftPGO.pose.pose.position.y;
+    transformStamped.transform.translation.z = odomAftPGO.pose.pose.position.z;
+    transformStamped.transform.rotation.x = odomAftPGO.pose.pose.orientation.x;
+    transformStamped.transform.rotation.y = odomAftPGO.pose.pose.orientation.y;
+    transformStamped.transform.rotation.z = odomAftPGO.pose.pose.orientation.z;
+    transformStamped.transform.rotation.w = odomAftPGO.pose.pose.orientation.w; 
+
+    br.sendTransform(transformStamped);
 } // pubPath
 
 void updatePoses(void)
@@ -505,12 +523,12 @@ std::optional<gtsam::Pose3> doICPVirtualRelative( int _loop_kf_idx, int _curr_kf
     // loop verification 
     sensor_msgs::PointCloud2 cureKeyframeCloudMsg;
     pcl::toROSMsg(*cureKeyframeCloud, cureKeyframeCloudMsg);
-    cureKeyframeCloudMsg.header.frame_id = "camera_init";
+    cureKeyframeCloudMsg.header.frame_id = odom_frame;
     pubLoopScanLocal.publish(cureKeyframeCloudMsg);
 
     sensor_msgs::PointCloud2 targetKeyframeCloudMsg;
     pcl::toROSMsg(*targetKeyframeCloud, targetKeyframeCloudMsg);
-    targetKeyframeCloudMsg.header.frame_id = "camera_init";
+    targetKeyframeCloudMsg.header.frame_id = odom_frame;
     pubLoopSubmapLocal.publish(targetKeyframeCloudMsg);
 
     // ICP Settings
@@ -827,7 +845,7 @@ void pubMap(void)
 
     sensor_msgs::PointCloud2 laserCloudMapPGOMsg;
     pcl::toROSMsg(*laserCloudMapPGO, laserCloudMapPGOMsg);
-    laserCloudMapPGOMsg.header.frame_id = "camera_init";
+    laserCloudMapPGOMsg.header.frame_id = odom_frame;
     pubMapAftPGO.publish(laserCloudMapPGOMsg);
 }
 
@@ -848,6 +866,11 @@ int main(int argc, char **argv)
 {
 	ros::init(argc, argv, "laserPGO");
 	ros::NodeHandle nh;
+    ros::NodeHandle private_nh("~");
+
+    private_nh.param<std::string>("map_frame",map_frame,"odom");
+    private_nh.param<std::string>("odom_frame",odom_frame,"odom");
+    private_nh.param<std::string>("base_frame",base_frame,"base_footprint");
 
     // save directories 
 	nh.param<std::string>("save_directory", save_directory, "/home/Shared/"); // pose assignment every k m move 
@@ -856,6 +879,22 @@ int main(int argc, char **argv)
     odomKITTIformat = save_directory + "odom_poses.txt";
 
     // pgG2oSaveStream = std::fstream(save_directory + "singlesession_posegraph.g2o", std::fstream::out);
+    // static tf2_ros::StaticTransformBroadcaster static_broadcaster;
+    // geometry_msgs::TransformStamped static_transformStamped;
+
+    // static_transformStamped.header.stamp = ros::Time::now();
+    // static_transformStamped.header.frame_id = map_frame;
+    // static_transformStamped.child_frame_id = odom_frame;
+    // static_transformStamped.transform.translation.x = 0.0;
+    // static_transformStamped.transform.translation.y = 0.0;
+    // static_transformStamped.transform.translation.z = 0.0;
+    // tf2::Quaternion quat;
+    // quat.setRPY(0.0, 0.0, 0.0);
+    // static_transformStamped.transform.rotation.x = quat.x();
+    // static_transformStamped.transform.rotation.y = quat.y();
+    // static_transformStamped.transform.rotation.z = quat.z();
+    // static_transformStamped.transform.rotation.w = quat.w();
+    // static_broadcaster.sendTransform(static_transformStamped);
 
     pgTimeSaveStream = std::fstream(save_directory + "times.txt", std::fstream::out); 
     pgTimeSaveStream.precision(std::numeric_limits<double>::max_digits10);
@@ -893,17 +932,17 @@ int main(int argc, char **argv)
 	nh.param<double>("mapviz_filter_size", mapVizFilterSize, 0.4); // pose assignment every k frames 
     downSizeFilterMapPGO.setLeafSize(mapVizFilterSize, mapVizFilterSize, mapVizFilterSize);
 
-	ros::Subscriber subLaserCloudFullRes = nh.subscribe<sensor_msgs::PointCloud2>("/velodyne_cloud_registered_local", 100, laserCloudFullResHandler);
-	ros::Subscriber subLaserOdometry = nh.subscribe<nav_msgs::Odometry>("/aft_mapped_to_init", 100, laserOdometryHandler);
-	ros::Subscriber subGPS = nh.subscribe<sensor_msgs::NavSatFix>("/gps/fix", 100, gpsHandler);
+	ros::Subscriber subLaserCloudFullRes = nh.subscribe<sensor_msgs::PointCloud2>("velodyne_cloud_registered_local", 100, laserCloudFullResHandler);
+	ros::Subscriber subLaserOdometry = nh.subscribe<nav_msgs::Odometry>("aft_mapped_to_init", 100, laserOdometryHandler);
+	ros::Subscriber subGPS = nh.subscribe<sensor_msgs::NavSatFix>("gps/fix", 100, gpsHandler);
 
-	pubOdomAftPGO = nh.advertise<nav_msgs::Odometry>("/aft_pgo_odom", 100);
-	pubOdomRepubVerifier = nh.advertise<nav_msgs::Odometry>("/repub_odom", 100);
-	pubPathAftPGO = nh.advertise<nav_msgs::Path>("/aft_pgo_path", 100);
-	pubMapAftPGO = nh.advertise<sensor_msgs::PointCloud2>("/aft_pgo_map", 100);
+	pubOdomAftPGO = nh.advertise<nav_msgs::Odometry>("aft_pgo_odom", 100);
+	pubOdomRepubVerifier = nh.advertise<nav_msgs::Odometry>("repub_odom", 100);
+	pubPathAftPGO = nh.advertise<nav_msgs::Path>("aft_pgo_path", 100);
+	pubMapAftPGO = nh.advertise<sensor_msgs::PointCloud2>("aft_pgo_map", 100);
 
-	pubLoopScanLocal = nh.advertise<sensor_msgs::PointCloud2>("/loop_scan_local", 100);
-	pubLoopSubmapLocal = nh.advertise<sensor_msgs::PointCloud2>("/loop_submap_local", 100);
+	pubLoopScanLocal = nh.advertise<sensor_msgs::PointCloud2>("loop_scan_local", 100);
+	pubLoopSubmapLocal = nh.advertise<sensor_msgs::PointCloud2>("loop_submap_local", 100);
 
 	std::thread posegraph_slam {process_pg}; // pose graph construction
 	std::thread lc_detection {process_lcd}; // loop closure detection 
@@ -912,6 +951,8 @@ int main(int argc, char **argv)
 
 	std::thread viz_map {process_viz_map}; // visualization - map (low frequency because it is heavy)
 	std::thread viz_path {process_viz_path}; // visualization - path (high frequency)
+
+    
 
  	ros::spin();
 
